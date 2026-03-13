@@ -1,7 +1,7 @@
 """
-Fast URL-Only Feature Extraction
-Extracts features from URLs without making any network calls (no WHOIS, no HTTP requests).
-Processes 1M URLs in minutes instead of days.
+Fast URL + HTML Feature Extraction
+Extracts features from URLs and HTML files without making any network calls.
+Processes URLs and their corresponding HTML files efficiently.
 """
 
 import pandas as pd
@@ -11,14 +11,18 @@ from urllib.parse import urlparse
 import ipaddress
 import time
 import warnings
+import os
+from bs4 import BeautifulSoup
+from pathlib import Path
 warnings.filterwarnings('ignore')
 
 
 # ==================== CONFIGURATION ====================
 CONFIG = {
-    'input_file': 'dataset.csv',
-    'output_file': 'fast_url_features.csv',
-    'batch_size': 10000,  # Process in batches for memory efficiency
+    'input_file': 'dataset-folder/dataset/data_dropped.csv',
+    'html_folder': 'dataset-folder/dataset/',  # Folder containing HTML files
+    'output_file': 'fast_url_html_features.csv',
+    'batch_size': 1000,  # Process in batches for memory efficiency
 }
 
 # URL Shortening Services
@@ -31,7 +35,164 @@ SHORTENING_SERVICES = r"bit\.ly|goo\.gl|shorte\.st|go2l\.ink|x\.co|ow\.ly|t\.co|
                       r"filoops\.info|vzturl\.com|qr\.net|1url\.com|tweez\.me|v\.gd|tr\.im|link\.zip\.net"
 
 
-# ==================== FAST FEATURE EXTRACTION FUNCTIONS ====================
+# ==================== HTML FEATURE EXTRACTION FUNCTIONS ====================
+
+def extract_html_features(html_path):
+    """
+    Extract features from HTML file.
+    Returns a dictionary with all extracted HTML features.
+    """
+    features = {}
+    
+    # Check if file exists
+    if not os.path.exists(html_path):
+        # Return default values for missing files
+        return get_default_html_features()
+    
+    try:
+        # Read HTML file
+        with open(html_path, 'r', encoding='utf-8', errors='ignore') as f:
+            html_content = f.read()
+        
+        # Parse HTML
+        soup = BeautifulSoup(html_content, 'html.parser')
+        
+        # 1. Form features
+        forms = soup.find_all('form')
+        features['NoOfForms'] = len(forms)
+        
+        # 2. Input fields
+        inputs = soup.find_all('input')
+        features['NoOfInputs'] = len(inputs)
+        features['NoOfPasswordFields'] = len([i for i in inputs if i.get('type') == 'password'])
+        features['NoOfEmailFields'] = len([i for i in inputs if i.get('type') == 'email' or 'email' in str(i.get('name', '')).lower()])
+        features['NoOfHiddenFields'] = len([i for i in inputs if i.get('type') == 'hidden'])
+        
+        # 3. Link features
+        links = soup.find_all('a', href=True)
+        features['NoOfLinks'] = len(links)
+        
+        # Count external vs internal links
+        external_links = 0
+        internal_links = 0
+        null_links = 0
+        
+        for link in links:
+            href = link.get('href', '')
+            if href.startswith('http://') or href.startswith('https://'):
+                external_links += 1
+            elif href.startswith('#') or href == '' or href.startswith('javascript:'):
+                null_links += 1
+            else:
+                internal_links += 1
+        
+        features['NoOfExternalLinks'] = external_links
+        features['NoOfInternalLinks'] = internal_links
+        features['NoOfNullLinks'] = null_links
+        features['ExternalLinkRatio'] = external_links / max(len(links), 1)
+        
+        # 4. Form action analysis
+        external_form_actions = 0
+        for form in forms:
+            action = form.get('action', '')
+            if action.startswith('http://') or action.startswith('https://'):
+                external_form_actions += 1
+        features['NoOfExternalFormActions'] = external_form_actions
+        
+        # 5. Script tags
+        scripts = soup.find_all('script')
+        features['NoOfScripts'] = len(scripts)
+        features['NoOfInlineScripts'] = len([s for s in scripts if s.string and len(s.string.strip()) > 0])
+        
+        # 6. IFrame tags
+        iframes = soup.find_all('iframe')
+        features['NoOfIframes'] = len(iframes)
+        
+        # 7. Image tags
+        images = soup.find_all('img')
+        features['NoOfImages'] = len(images)
+        
+        # 8. Meta tags
+        meta_tags = soup.find_all('meta')
+        features['NoOfMetaTags'] = len(meta_tags)
+        
+        # 9. Title
+        title = soup.find('title')
+        features['HasTitle'] = 1 if title and title.string else 0
+        features['TitleLength'] = len(title.string) if title and title.string else 0
+        
+        # 10. Suspicious keywords in HTML
+        html_text = soup.get_text().lower()
+        suspicious_keywords = ['verify', 'account', 'suspend', 'login', 'signin', 'update', 
+                              'confirm', 'secure', 'banking', 'click here', 'urgent', 
+                              'expired', 'verify your account', 'update your information']
+        features['SuspiciousKeywordsCount'] = sum(1 for keyword in suspicious_keywords if keyword in html_text)
+        
+        # 11. Button tags
+        buttons = soup.find_all('button')
+        features['NoOfButtons'] = len(buttons)
+        
+        # 12. Text fields
+        textareas = soup.find_all('textarea')
+        features['NoOfTextareas'] = len(textareas)
+        
+        # 13. CSS analysis
+        styles = soup.find_all('style')
+        features['NoOfStyleTags'] = len(styles)
+        
+        # 14. External CSS
+        css_links = soup.find_all('link', rel='stylesheet')
+        features['NoOfExternalCSS'] = len(css_links)
+        
+        # 15. Obfuscation indicators
+        features['HasObfuscation'] = 1 if ('display:none' in html_content.lower() or 
+                                            'visibility:hidden' in html_content.lower()) else 0
+        
+        # 16. Pop-up indicators
+        features['HasPopup'] = 1 if ('window.open' in html_content.lower() or 
+                                      'alert(' in html_content.lower()) else 0
+        
+        # 17. Document length
+        features['HTMLLength'] = len(html_content)
+        features['TextLength'] = len(html_text)
+        features['TextToHTMLRatio'] = len(html_text) / max(len(html_content), 1)
+        
+        # 18. Has favicon
+        favicon = soup.find('link', rel=lambda x: x and 'icon' in x.lower()) if soup.find('link') else None
+        features['HasFavicon'] = 1 if favicon else 0
+        
+        # 19. Social media links
+        social_keywords = ['facebook', 'twitter', 'instagram', 'linkedin', 'youtube']
+        features['NoOfSocialLinks'] = sum(1 for link in links 
+                                          if any(social in link.get('href', '').lower() 
+                                                for social in social_keywords))
+        
+        # 20. Email in HTML
+        email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+        features['NoOfEmailsInHTML'] = len(re.findall(email_pattern, html_content))
+        
+    except Exception as e:
+        # If any error occurs, return default features
+        return get_default_html_features()
+    
+    return features
+
+
+def get_default_html_features():
+    """Return default HTML features when file is missing or error occurs."""
+    return {
+        'NoOfForms': 0, 'NoOfInputs': 0, 'NoOfPasswordFields': 0, 'NoOfEmailFields': 0,
+        'NoOfHiddenFields': 0, 'NoOfLinks': 0, 'NoOfExternalLinks': 0, 'NoOfInternalLinks': 0,
+        'NoOfNullLinks': 0, 'ExternalLinkRatio': 0, 'NoOfExternalFormActions': 0,
+        'NoOfScripts': 0, 'NoOfInlineScripts': 0, 'NoOfIframes': 0, 'NoOfImages': 0,
+        'NoOfMetaTags': 0, 'HasTitle': 0, 'TitleLength': 0, 'SuspiciousKeywordsCount': 0,
+        'NoOfButtons': 0, 'NoOfTextareas': 0, 'NoOfStyleTags': 0, 'NoOfExternalCSS': 0,
+        'HasObfuscation': 0, 'HasPopup': 0, 'HTMLLength': 0, 'TextLength': 0,
+        'TextToHTMLRatio': 0, 'HasFavicon': 0, 'NoOfSocialLinks': 0, 'NoOfEmailsInHTML': 0
+    }
+
+
+# ==================== URL FEATURE EXTRACTION FUNCTIONS ====================
 
 def extract_url_features_vectorized(urls):
     """
@@ -197,7 +358,7 @@ def extract_url_features_vectorized(urls):
 def process_dataset():
     """Process the dataset in batches for memory efficiency."""
     print("="*80)
-    print("FAST URL-ONLY FEATURE EXTRACTION")
+    print("FAST URL + HTML FEATURE EXTRACTION")
     print("="*80)
     
     # Load dataset
@@ -209,7 +370,7 @@ def process_dataset():
     print(f"Dataset shape: {data.shape}")
     print(f"Columns: {list(data.columns)}")
     print(f"\nClass distribution:")
-    print(data['type'].value_counts())
+    print(data['result'].value_counts())
     
     total_rows = len(data)
     batch_size = CONFIG['batch_size']
@@ -222,16 +383,30 @@ def process_dataset():
     
     # Process in batches
     all_results = []
+    html_folder = CONFIG['html_folder']
     
     for batch_start in range(0, total_rows, batch_size):
         batch_end = min(batch_start + batch_size, total_rows)
         batch = data.iloc[batch_start:batch_end]
         
-        # Extract features for this batch
+        # Extract URL features for this batch
         batch_features = extract_url_features_vectorized(batch['url'].values)
         
+        # Extract HTML features for this batch
+        print(f"  Extracting HTML features...")
+        html_features_list = []
+        for idx, row in batch.iterrows():
+            html_filename = row['website']
+            html_path = os.path.join(html_folder, html_filename)
+            html_features = extract_html_features(html_path)
+            html_features_list.append(html_features)
+        
+        # Combine URL and HTML features
+        html_features_df = pd.DataFrame(html_features_list)
+        batch_features = pd.concat([batch_features, html_features_df], axis=1)
+        
         # Add label
-        batch_features['Label'] = batch['type'].values
+        batch_features['Label'] = batch['result'].values
         
         all_results.append(batch_features)
         
