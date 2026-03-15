@@ -101,7 +101,10 @@ def _normalize_blacklist_entry(raw_entry):
     if entry.startswith(('http://', 'https://')):
         return ('url', entry)
 
-    parsed = urlparse(entry if '://' in entry else f"http://{entry}")
+    try:
+        parsed = urlparse(entry if '://' in entry else f"http://{entry}")
+    except ValueError:
+        return None
     domain = parsed.netloc or parsed.path
     domain = domain.strip().lower()
 
@@ -116,19 +119,29 @@ def _normalize_blacklist_entry(raw_entry):
     return None
 
 
+def _is_parseable_blacklist_line(raw_entry):
+    """Return True for non-empty, non-comment lines intended for parsing."""
+    line = raw_entry.strip()
+    return bool(line) and not line.startswith('#')
+
+
 def load_blacklist_file(filepath):
     """Load local blacklist entries from disk."""
     blacklisted_domains = set()
     blacklisted_urls = set()
+    malformed_lines = 0
 
     if not os.path.exists(filepath):
-        return blacklisted_domains, blacklisted_urls
+        return blacklisted_domains, blacklisted_urls, malformed_lines
 
     try:
         with open(filepath, 'r', encoding='utf-8', errors='ignore') as file_handle:
             for line in file_handle:
+                should_parse = _is_parseable_blacklist_line(line)
                 normalized = _normalize_blacklist_entry(line)
                 if not normalized:
+                    if should_parse:
+                        malformed_lines += 1
                     continue
                 entry_kind, value = normalized
                 if entry_kind == 'url':
@@ -138,13 +151,14 @@ def load_blacklist_file(filepath):
     except Exception as e:
         print(f"{Fore.YELLOW}⚠ Warning: Could not read blacklist file '{filepath}': {e}{Style.RESET_ALL}")
 
-    return blacklisted_domains, blacklisted_urls
+    return blacklisted_domains, blacklisted_urls, malformed_lines
 
 
 def fetch_blacklist_from_sources(urls, timeout=BLACKLIST_FETCH_TIMEOUT):
     """Fetch blacklist entries from remote text feeds."""
     fetched_domains = set()
     fetched_urls = set()
+    malformed_lines = 0
 
     for source_url in urls:
         try:
@@ -152,8 +166,11 @@ def fetch_blacklist_from_sources(urls, timeout=BLACKLIST_FETCH_TIMEOUT):
             response.raise_for_status()
 
             for line in response.text.splitlines():
+                should_parse = _is_parseable_blacklist_line(line)
                 normalized = _normalize_blacklist_entry(line)
                 if not normalized:
+                    if should_parse:
+                        malformed_lines += 1
                     continue
                 entry_kind, value = normalized
                 if entry_kind == 'url':
@@ -168,21 +185,27 @@ def fetch_blacklist_from_sources(urls, timeout=BLACKLIST_FETCH_TIMEOUT):
         except Exception as e:
             print(f"{Fore.YELLOW}⚠ Warning: Could not fetch blacklist source '{source_url}': {e}{Style.RESET_ALL}")
 
-    return fetched_domains, fetched_urls
+    return fetched_domains, fetched_urls, malformed_lines
 
 
 def load_blacklist(local_file, source_urls):
     """Combine local and remote blacklist entries."""
-    file_domains, file_urls = load_blacklist_file(local_file)
-    remote_domains, remote_urls = fetch_blacklist_from_sources(source_urls)
+    file_domains, file_urls, malformed_file_lines = load_blacklist_file(local_file)
+    remote_domains, remote_urls, malformed_remote_lines = fetch_blacklist_from_sources(source_urls)
 
     blacklisted_domains = file_domains.union(remote_domains)
     blacklisted_urls = file_urls.union(remote_urls)
+    malformed_total = malformed_file_lines + malformed_remote_lines
 
     print(
         f"{Fore.CYAN}ℹ Blacklist ready: {len(blacklisted_domains)} domains, "
         f"{len(blacklisted_urls)} URLs{Style.RESET_ALL}"
     )
+    if malformed_total > 0:
+        print(
+            f"{Fore.YELLOW}⚠ Debug: skipped {malformed_total} malformed blacklist lines "
+            f"(local={malformed_file_lines}, remote={malformed_remote_lines}){Style.RESET_ALL}"
+        )
     return blacklisted_domains, blacklisted_urls
 
 
